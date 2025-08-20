@@ -5,6 +5,7 @@ from time import time
 
 import torch
 import torch.nn as nn
+import numpy as np
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
@@ -12,7 +13,7 @@ from tqdm import tqdm
 from model import get_model
 from utils import seed_everything, get_device, make_dataloaders, save_label_map, accuracy
 
-def train_one_epoch(model, loader, criterion, optimizer, device, scaler=None):
+def train_one_epoch(model, loader, criterion, optimizer, device, scaler=None, mixup_alpha=0.0):
     model.train()
     running_loss, running_acc, n = 0.0, 0.0, 0
     for imgs, labels in tqdm(loader, desc="Train", leave=False):
@@ -20,18 +21,42 @@ def train_one_epoch(model, loader, criterion, optimizer, device, scaler=None):
 
         optimizer.zero_grad(set_to_none=True)
 
-        if scaler is not None:
-            with torch.cuda.amp.autocast():
+        # apply mixup if requested
+        if mixup_alpha > 0.0:
+            lam = np.random.beta(mixup_alpha, mixup_alpha)
+            batch_size = imgs.size(0)
+            index = torch.randperm(batch_size).to(device)
+            mixed_imgs = lam * imgs + (1 - lam) * imgs[index, :]
+
+            if scaler is not None:
+                with torch.cuda.amp.autocast():
+                    logits = model(mixed_imgs)
+                    loss_a = criterion(logits, labels)
+                    loss_b = criterion(logits, labels[index])
+                    loss = lam * loss_a + (1 - lam) * loss_b
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                logits = model(mixed_imgs)
+                loss_a = criterion(logits, labels)
+                loss_b = criterion(logits, labels[index])
+                loss = lam * loss_a + (1 - lam) * loss_b
+                loss.backward()
+                optimizer.step()
+        else:
+            if scaler is not None:
+                with torch.cuda.amp.autocast():
+                    logits = model(imgs)
+                    loss = criterion(logits, labels)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
                 logits = model(imgs)
                 loss = criterion(logits, labels)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            logits = model(imgs)
-            loss = criterion(logits, labels)
-            loss.backward()
-            optimizer.step()
+                loss.backward()
+                optimizer.step()
 
         bs = labels.size(0)
         running_loss += loss.item() * bs
@@ -57,7 +82,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_dir", default=None, help="Path to training dataset (defaults to ./dataset/training)")
     parser.add_argument("--val_dir",   default=None, help="Path to validation dataset (defaults to ./dataset/validation)")
-    parser.add_argument("--backbone",  default="resnet18", choices=["resnet18", "mobilenet_v3_small", "efficientnet_b0"])
+    parser.add_argument("--backbone",  default="resnet18", choices=["resnet18", "resnet50", "mobilenet_v3_small", "efficientnet_b0"])
     parser.add_argument("--epochs",    type=int, default=15)
     parser.add_argument("--batch_size",type=int, default=32)
     parser.add_argument("--lr",        type=float, default=1e-3)
@@ -68,6 +93,10 @@ def main():
     parser.add_argument("--freeze_backbone", action="store_true", help="Freeze backbone for faster/safer fine-tuning.")
     parser.add_argument("--amp", action="store_true", help="Use mixed precision if CUDA available.")
     parser.add_argument("--out_dir", default=None, help="Output directory for checkpoints and label map (defaults to project root)")
+    parser.add_argument("--oversample", action="store_true", help="Use oversampling (WeightedRandomSampler) to balance classes")
+    parser.add_argument("--use_focal", action="store_true", help="Use focal loss instead of CrossEntropyLoss")
+    parser.add_argument("--freeze_epochs", type=int, default=0, help="Number of initial epochs to freeze backbone (0 = no freeze)")
+    parser.add_argument("--mixup_alpha", type=float, default=0.0, help="MixUp alpha (0 disables mixup)")
     args = parser.parse_args()
 
     # Resolve defaults relative to this script's directory (project root)
@@ -93,8 +122,8 @@ def main():
     print(f"Using device: {device}")
 
     # Data
-    train_loader, val_loader, class_names = make_dataloaders(
-        train_dir, val_dir, img_size=args.img_size, batch_size=args.batch_size, num_workers=args.num_workers
+    train_loader, val_loader, class_names, class_weights = make_dataloaders(
+        train_dir, val_dir, img_size=args.img_size, batch_size=args.batch_size, num_workers=args.num_workers, oversample=args.oversample
     )
     num_classes = len(class_names)
     print(f"Classes: {class_names}")
@@ -102,8 +131,28 @@ def main():
     # Model
     model = get_model(args.backbone, num_classes=num_classes, pretrained=True, freeze_backbone=args.freeze_backbone).to(device)
 
+    # ensure class_weights live on the same device as the model
+    if class_weights is not None:
+        class_weights = class_weights.to(device)
+
     # Loss / Optim / Scheduler
-    criterion = nn.CrossEntropyLoss()
+    # Loss: either weighted CrossEntropy or focal loss
+    if args.use_focal:
+        class FocalLoss(nn.Module):
+            def __init__(self, gamma=2.0, weight=None):
+                super().__init__()
+                self.gamma = gamma
+                self.weight = weight
+
+            def forward(self, inputs, targets):
+                ce = nn.functional.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
+                pt = torch.exp(-ce)
+                loss = ((1 - pt) ** self.gamma) * ce
+                return loss.mean()
+
+        criterion = FocalLoss(weight=class_weights.to(torch.float) if class_weights is not None else None)
+    else:
+        criterion = nn.CrossEntropyLoss(weight=class_weights.to(torch.float))
     optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
 
@@ -113,9 +162,29 @@ def main():
     label_map_path = os.path.join(out_dir, "label_map.json")
     save_label_map(class_names, label_map_path)
 
+    # optionally freeze backbone for initial epochs
+    if args.freeze_epochs > 0:
+        # freeze all params except classifier head
+        for name, p in model.named_parameters():
+            if args.backbone.startswith('resnet'):
+                # resnet's head is 'fc'
+                if not name.startswith('fc.'):
+                    p.requires_grad = False
+            else:
+                # for other nets try to keep final classifier trainable
+                if not name.startswith('classifier.') and not name.startswith('fc.'):
+                    p.requires_grad = False
+
     for epoch in range(1, args.epochs + 1):
+        # unfreeze after freeze_epochs
+        if epoch == args.freeze_epochs + 1 and args.freeze_epochs > 0:
+            for name, p in model.named_parameters():
+                p.requires_grad = True
+            # recreate optimizer so it picks up newly unfrozen params
+            optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
+            scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
         print(f"\nEpoch {epoch}/{args.epochs}")
-        tr_loss, tr_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, scaler)
+        tr_loss, tr_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, scaler, mixup_alpha=args.mixup_alpha)
         vl_loss, vl_acc = validate(model, val_loader, criterion, device)
         scheduler.step()
 

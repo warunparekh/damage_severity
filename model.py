@@ -22,6 +22,18 @@ def get_model(backbone: str, num_classes: int, pretrained: bool = True, freeze_b
 
         return net
 
+    elif backbone == "resnet50":
+        net = models.resnet50(weights=models.ResNet50_Weights.DEFAULT if pretrained else None)
+        in_features = net.fc.in_features
+        net.fc = nn.Linear(in_features, num_classes)
+
+        if freeze_backbone:
+            for name, p in net.named_parameters():
+                if not name.startswith("fc."):
+                    p.requires_grad = False
+
+        return net
+
     elif backbone == "mobilenet_v3_small":
         net = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.DEFAULT if pretrained else None)
         in_features = net.classifier[-1].in_features
