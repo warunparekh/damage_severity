@@ -30,6 +30,7 @@ def main():
     parser.add_argument("--img_size", type=int, default=224)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--tta", type=int, default=1, help="Test-time augmentation passes (1 disables)")
     args = parser.parse_args()
 
     # Resolve defaults relative to this script (project root)
@@ -81,7 +82,17 @@ def main():
     with torch.no_grad():
         for imgs, labels in val_loader:
             imgs, labels = imgs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-            logits = model(imgs)
+            if args.tta > 1:
+                logits_sum = 0
+                for i in range(args.tta):
+                    if i % 2 == 1:
+                        imgs_aug = torch.flip(imgs, dims=[3])
+                    else:
+                        imgs_aug = imgs
+                    logits_sum = logits_sum + model(imgs_aug)
+                logits = logits_sum / args.tta
+            else:
+                logits = model(imgs)
             loss = criterion(logits, labels)
 
             preds = logits.argmax(dim=1)
