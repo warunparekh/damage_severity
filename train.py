@@ -1,7 +1,6 @@
 # train.py
 import argparse
 import os
-from time import time
 
 import torch
 import torch.nn as nn
@@ -18,16 +17,12 @@ def train_one_epoch(model, loader, criterion, optimizer, device, scaler=None, mi
     running_loss, running_acc, n = 0.0, 0.0, 0
     for imgs, labels in tqdm(loader, desc="Train", leave=False):
         imgs, labels = imgs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-
         optimizer.zero_grad(set_to_none=True)
-
-        # apply mixup if requested
         if mixup_alpha > 0.0:
             lam = np.random.beta(mixup_alpha, mixup_alpha)
             batch_size = imgs.size(0)
             index = torch.randperm(batch_size).to(device)
             mixed_imgs = lam * imgs + (1 - lam) * imgs[index, :]
-
             if scaler is not None:
                 with torch.cuda.amp.autocast():
                     logits = model(mixed_imgs)
@@ -57,7 +52,6 @@ def train_one_epoch(model, loader, criterion, optimizer, device, scaler=None, mi
                 loss = criterion(logits, labels)
                 loss.backward()
                 optimizer.step()
-
         bs = labels.size(0)
         running_loss += loss.item() * bs
         running_acc  += accuracy(logits, labels) * bs
@@ -80,8 +74,8 @@ def validate(model, loader, criterion, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train_dir", default=None, help="Path to training dataset (defaults to ./dataset/training)")
-    parser.add_argument("--val_dir",   default=None, help="Path to validation dataset (defaults to ./dataset/validation)")
+    parser.add_argument("--train_dir", default=None)
+    parser.add_argument("--val_dir",   default=None)
     parser.add_argument("--backbone",  default="resnet18", choices=["resnet18", "resnet50", "mobilenet_v3_small", "efficientnet_b0"])
     parser.add_argument("--epochs",    type=int, default=15)
     parser.add_argument("--batch_size",type=int, default=32)
@@ -90,30 +84,26 @@ def main():
     parser.add_argument("--img_size",  type=int, default=224)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seed",      type=int, default=42)
-    parser.add_argument("--freeze_backbone", action="store_true", help="Freeze backbone for faster/safer fine-tuning.")
-    parser.add_argument("--amp", action="store_true", help="Use mixed precision if CUDA available.")
-    parser.add_argument("--out_dir", default=None, help="Output directory for checkpoints and label map (defaults to project root)")
-    parser.add_argument("--oversample", action="store_true", help="Use oversampling (WeightedRandomSampler) to balance classes")
-    parser.add_argument("--use_focal", action="store_true", help="Use focal loss instead of CrossEntropyLoss")
-    parser.add_argument("--freeze_epochs", type=int, default=0, help="Number of initial epochs to freeze backbone (0 = no freeze)")
-    parser.add_argument("--mixup_alpha", type=float, default=0.0, help="MixUp alpha (0 disables mixup)")
+    parser.add_argument("--freeze_backbone", action="store_true")
+    parser.add_argument("--amp", action="store_true")
+    parser.add_argument("--out_dir", default=None)
+    parser.add_argument("--oversample", action="store_true")
+    parser.add_argument("--use_focal", action="store_true")
+    parser.add_argument("--freeze_epochs", type=int, default=0)
+    parser.add_argument("--mixup_alpha", type=float, default=0.0)
     args = parser.parse_args()
 
-    # Resolve defaults relative to this script's directory (project root)
     project_root = os.path.dirname(os.path.abspath(__file__))
     train_dir = args.train_dir or os.path.join(project_root, "dataset", "training")
     val_dir = args.val_dir or os.path.join(project_root, "dataset", "validation")
     out_dir = args.out_dir or project_root
 
-    # Validate paths early with helpful messages
     if not os.path.isdir(train_dir):
         raise FileNotFoundError(f"Training directory not found: {train_dir}\n" \
-                                f"Expected dataset at './dataset/training' relative to project root ({project_root}).\n" \
-                                "If your dataset is located elsewhere, pass --train_dir with the correct path.")
+                                f"Expected dataset at './dataset/training' relative to project root ({project_root}).\n")
     if not os.path.isdir(val_dir):
         raise FileNotFoundError(f"Validation directory not found: {val_dir}\n" \
-                                f"Expected dataset at './dataset/validation' relative to project root ({project_root}).\n" \
-                                "If your dataset is located elsewhere, pass --val_dir with the correct path.")
+                                f"Expected dataset at './dataset/validation' relative to project root ({project_root}).\n")
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -121,35 +111,28 @@ def main():
     device = get_device()
     print(f"Using device: {device}")
 
-    # Data
     train_loader, val_loader, class_names, class_weights = make_dataloaders(
         train_dir, val_dir, img_size=args.img_size, batch_size=args.batch_size, num_workers=args.num_workers, oversample=args.oversample
     )
     num_classes = len(class_names)
     print(f"Classes: {class_names}")
 
-    # Model
     model = get_model(args.backbone, num_classes=num_classes, pretrained=True, freeze_backbone=args.freeze_backbone).to(device)
 
-    # ensure class_weights live on the same device as the model
     if class_weights is not None:
         class_weights = class_weights.to(device)
 
-    # Loss / Optim / Scheduler
-    # Loss: either weighted CrossEntropy or focal loss
     if args.use_focal:
         class FocalLoss(nn.Module):
             def __init__(self, gamma=2.0, weight=None):
                 super().__init__()
                 self.gamma = gamma
                 self.weight = weight
-
             def forward(self, inputs, targets):
                 ce = nn.functional.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
                 pt = torch.exp(-ce)
                 loss = ((1 - pt) ** self.gamma) * ce
                 return loss.mean()
-
         criterion = FocalLoss(weight=class_weights.to(torch.float) if class_weights is not None else None)
     else:
         criterion = nn.CrossEntropyLoss(weight=class_weights.to(torch.float))
@@ -162,25 +145,19 @@ def main():
     label_map_path = os.path.join(out_dir, "label_map.json")
     save_label_map(class_names, label_map_path)
 
-    # optionally freeze backbone for initial epochs
     if args.freeze_epochs > 0:
-        # freeze all params except classifier head
         for name, p in model.named_parameters():
             if args.backbone.startswith('resnet'):
-                # resnet's head is 'fc'
                 if not name.startswith('fc.'):
                     p.requires_grad = False
             else:
-                # for other nets try to keep final classifier trainable
                 if not name.startswith('classifier.') and not name.startswith('fc.'):
                     p.requires_grad = False
 
     for epoch in range(1, args.epochs + 1):
-        # unfreeze after freeze_epochs
         if epoch == args.freeze_epochs + 1 and args.freeze_epochs > 0:
             for name, p in model.named_parameters():
                 p.requires_grad = True
-            # recreate optimizer so it picks up newly unfrozen params
             optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
             scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
         print(f"\nEpoch {epoch}/{args.epochs}")
@@ -196,7 +173,7 @@ def main():
             torch.save({"state_dict": model.state_dict(),
                         "backbone": args.backbone,
                         "num_classes": num_classes}, best_path)
-            print(f"✅ Saved new best model to: {best_path}  (val acc: {best_acc:.4f})")
+            print(f"Saved new best model to: {best_path}  (val acc: {best_acc:.4f})")
 
     print(f"\nTraining done. Best val acc: {best_acc:.4f}")
     print(f"Model: {best_path}")

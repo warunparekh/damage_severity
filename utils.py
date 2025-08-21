@@ -1,4 +1,3 @@
-# utils.py
 import json
 import os
 import random
@@ -16,7 +15,7 @@ def seed_everything(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)  # type: ignore
+    torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
 
@@ -31,10 +30,6 @@ def make_dataloaders(
     num_workers: int = 4,
     oversample: bool = False,
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader, List[str], torch.Tensor]:
-    """
-    Builds ImageFolder datasets and dataloaders with sensible transforms.
-    """
-    # stronger training augmentations to improve generalization
     train_tfms = transforms.Compose([
         transforms.RandomResizedCrop(img_size),
         transforms.RandomHorizontalFlip(),
@@ -56,13 +51,10 @@ def make_dataloaders(
     train_ds = datasets.ImageFolder(root=train_dir, transform=train_tfms)
     val_ds   = datasets.ImageFolder(root=val_dir,   transform=val_tfms)
 
-    class_names = train_ds.classes  # relies on folder names
-    # Optionally use a WeightedRandomSampler to counter class imbalance
+    class_names = train_ds.classes
     if oversample:
-        # compute class counts and assign sample weights inversely proportional to class frequency
         targets = [y for _, y in train_ds.samples]
         class_sample_count = np.array([len([t for t in targets if t == c]) for c in range(len(train_ds.classes))])
-        # avoid division by zero
         class_sample_count = np.maximum(class_sample_count, 1)
         weights = 1.0 / class_sample_count
         samples_weight = np.array([weights[t] for t in targets], dtype=np.float32)
@@ -78,7 +70,6 @@ def make_dataloaders(
     val_loader = torch.utils.data.DataLoader(
         val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True
     )
-    # compute class weights for loss (inverse freq)
     targets = [y for _, y in train_ds.samples]
     class_counts = np.array([len([t for t in targets if t == c]) for c in range(len(train_ds.classes))])
     class_counts = np.maximum(class_counts, 1)

@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Damage Severity Demo</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial;
+        background: #f7f9fb;
+        color: #111;
+      }
+      .container {
+        max-width: 720px;
+        margin: 48px auto;
+        background: white;
+        padding: 28px;
+        border-radius: 8px;
+        box-shadow: 0 6px 18px rgba(15, 20, 30, 0.06);
+      }
+      h1 {
+        margin: 0 0 8px 0;
+        font-size: 22px;
+      }
+      p.lead {
+        color: #444;
+        margin-top: 0;
+      }
+      .upload {
+        margin-top: 18px;
+      }
+      .note {
+        color: #666;
+        font-size: 13px;
+      }
+      .error {
+        color: #b00020;
+        margin-top: 12px;
+      }
+      .footer {
+        margin-top: 18px;
+        font-size: 13px;
+        color: #666;
+      }
+      .btn {
+        background: #0b5cff;
+        color: white;
+        padding: 10px 14px;
+        border-radius: 6px;
+        border: none;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Accident Damage Severity — Demo</h1>
+      <p class="lead">
+        Upload a vehicle image. The model will predict damage severity (minor /
+        moderate / severe).
+      </p>
+
+      {% if error %}
+      <div class="error">{{ error }}</div>
+      {% endif %}
+
+      <form
+        id="uploadForm"
+        action="/predict"
+        method="post"
+        enctype="multipart/form-data"
+        class="upload"
+      >
+        <input
+          id="imageInput"
+          type="file"
+          name="image"
+          accept="image/*"
+          required
+        />
+
+        <div id="previewContainer" style="margin-top: 12px; display: none">
+          <img
+            id="previewImg"
+            src=""
+            alt="preview"
+            style="
+              width: 180px;
+              height: 180px;
+              object-fit: cover;
+              border-radius: 8px;
+              border: 1px solid #eee;
+              display: block;
+            "
+          />
+        </div>
+
+        <div style="margin-top: 12px">
+          <button id="submitBtn" class="btn" type="submit">
+            Upload & Predict
+          </button>
+        </div>
+      </form>
+
+      <!-- Inline result container for SPA behaviour -->
+      <div id="resultCard" style="display: none; margin-top: 18px"></div>
+      <script>
+        const input = document.getElementById("imageInput");
+        const previewContainer = document.getElementById("previewContainer");
+        const previewImg = document.getElementById("previewImg");
+        // previewName/previewNote removed: only show image preview
+        const form = document.getElementById("uploadForm");
+        const submitBtn = document.getElementById("submitBtn");
+        const resultCard = document.getElementById("resultCard");
+
+        input.addEventListener("change", function (e) {
+          const file = this.files && this.files[0];
+          if (!file) {
+            previewContainer.style.display = "none";
+            previewImg.src = "";
+            return;
+          }
+          if (!file.type.startsWith("image/")) {
+            previewContainer.style.display = "none";
+            previewImg.src = "";
+            return;
+          }
+
+          previewImg.src = URL.createObjectURL(file);
+          previewContainer.style.display = "block";
+        });
+
+        // Render result HTML into #resultCard
+        function renderResult({ label, prob, img_url }) {
+          const cls = label.toLowerCase().includes("minor")
+            ? "minor"
+            : label.toLowerCase().includes("moder")
+            ? "moderate"
+            : label.toLowerCase().includes("severe")
+            ? "severe"
+            : "unknown";
+          const percent = Math.round(prob * 100);
+          resultCard.innerHTML = `
+            <div style="background:white;padding:18px;border-radius:8px;box-shadow:0 6px 18px rgba(15,20,30,0.06)">
+              <div style="display:flex;gap:16px;align-items:flex-start">
+                <img src="${img_url}" style="width:220px;height:160px;object-fit:cover;border-radius:8px;border:1px solid #eee" />
+                <div style="flex:1">
+                          <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+                            <div style="padding:8px 12px;border-radius:999px;color:white;font-weight:600;background:${
+                              cls === "minor"
+                                ? "linear-gradient(90deg,#16a34a,#22c55e)"
+                                : cls === "moderate"
+                                ? "linear-gradient(90deg,#f59e0b,#fb923c)"
+                                : cls === "severe"
+                                ? "linear-gradient(90deg,#ef4444,#f97316)"
+                                : "#6b7280"
+                            }">${label}</div>
+                          </div>
+                  <div style="margin-top:12px">
+                    <button id="tryAgainBtn" class="btn">Try another image</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+
+          resultCard.style.display = "block";
+          // hide form to emphasize result; user can click Try another image
+          form.style.display = "none";
+
+          document
+            .getElementById("tryAgainBtn")
+            .addEventListener("click", () => {
+              resultCard.style.display = "none";
+              form.reset();
+              form.style.display = "block";
+              previewContainer.style.display = "none";
+              previewImg.src = "";
+            });
+        }
+
+        // Submit via fetch to keep single-page experience
+        form.addEventListener("submit", async function (e) {
+          e.preventDefault();
+          const fdata = new FormData(form);
+          submitBtn.disabled = true;
+          submitBtn.textContent = "Predicting...";
+          try {
+            const resp = await fetch(form.action, {
+              method: "POST",
+              body: fdata,
+              headers: { "X-Requested-With": "XMLHttpRequest" },
+            });
+            if (!resp.ok) {
+              const err = await resp
+                .json()
+                .catch(() => ({ error: "Server error" }));
+              resultCard.style.display = "block";
+              resultCard.innerHTML = `<div style="color:#b00020">${
+                err.error || "Prediction failed"
+              }</div>`;
+              return;
+            }
+            const data = await resp.json();
+            renderResult(data);
+          } catch (err) {
+            resultCard.style.display = "block";
+            resultCard.innerHTML = `<div style="color:#b00020">Network error: ${err.message}</div>`;
+          } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Upload & Predict";
+          }
+        });
+      </script>
+
+      <div class="footer">
+        Tip: Use a clear photo of the damaged area. Model expects natural
+        images.
+      </div>
+    </div>
+  </body>
+</html>
