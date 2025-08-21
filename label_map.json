@@ -1,12 +1,12 @@
 {
   "idx_to_class": {
-    "0": "01-minor",
-    "1": "02-moderate",
-    "2": "03-severe"
+    "0": "minor",
+    "1": "moderate",
+    "2": "severe"
   },
   "class_to_idx": {
-    "01-minor": 0,
-    "02-moderate": 1,
-    "03-severe": 2
+    "minor": 0,
+    "moderate": 1,
+    "severe": 2
   }
 }
